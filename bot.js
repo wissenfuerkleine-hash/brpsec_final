@@ -82,20 +82,30 @@ client.on('interactionCreate', async (interaction) => {
   const guild = interaction.guild;
   const statusChannel = await getOrCreateStatusChannel(guild);
 
+  // Sofort deferren, um den 3-Sekunden-Timeout von Discord zu verhindern
+  if (interaction.commandName === 'lockdown' || interaction.commandName === 'unlock') {
+    try {
+      await interaction.deferReply();
+    } catch (err) {
+      console.error('Fehler beim Deferren der Interaktion:', err.message);
+      return;
+    }
+  }
+
   if (interaction.commandName === 'lockdown') {
     const level = interaction.options.getInteger('level');
     const reason = interaction.options.getString('reason');
 
-    if (await lm.checkStatus()) return interaction.reply('❌ Der Server befindet sich bereits in einem Lockdown.');
+    if (await lm.checkStatus()) {
+      return interaction.editReply('❌ Der Server befindet sich bereits in einem Lockdown.');
+    }
 
-    await interaction.deferReply();
     const id = await lm.startLockdown(guild, level, reason);
     await interaction.editReply(`🚨 **LOCKDOWN AKTIVIERT**\n**ID:** \`${id}\``);
 
-    // Öffentliches Panel senden
     if (statusChannel) {
       const lockEmbed = new EmbedBuilder()
-        .setColor(0xFF0000) // Rot
+        .setColor(0xFF0000)
         .setTitle('🚨 SERVER LOCKDOWN AKTIVIERT 🚨')
         .setDescription('Zum Schutz der Community wurden die Serverrechte temporär eingeschränkt.')
         .addFields(
@@ -113,17 +123,17 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'unlock') {
-    if (!(await lm.checkStatus())) return interaction.reply('✅ Der Server ist aktuell nicht gesperrt.');
+    if (!(await lm.checkStatus())) {
+      return interaction.editReply('✅ Der Server ist aktuell nicht gesperrt.');
+    }
 
-    await interaction.deferReply();
     const success = await lm.stopLockdown(guild);
     if (success) {
       await interaction.editReply('🔓 **SERVER ENTSPERRT**');
 
-      // Öffentliches Panel senden
       if (statusChannel) {
         const unlockEmbed = new EmbedBuilder()
-          .setColor(0x00FF00) // Grün
+          .setColor(0x00FF00)
           .setTitle('🔓 SERVER WIEDER GEÖFFNET 🔓')
           .setDescription('Der Lockdown wurde beendet. Alle Funktionen und Kanäle stehen euch wieder wie gewohnt zur Verfügung!')
           .addFields(
