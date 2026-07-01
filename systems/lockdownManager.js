@@ -6,33 +6,57 @@ class LockdownManager {
     this.client = client;
   }
 
-  // SNAPSHOT ERSTELLEN & KANÄLE SPERREN
   async startLockdown(guild, level, reason) {
     const incidentId = `INC-${Date.now()}`;
     const channelData = [];
     const roleData = [];
 
-    // Jeden einzelnen Kanal scannen und Rechte für jede Rolle/User sichern
+    // 1. Snapshot der Kanalrechte erstellen
     guild.channels.cache.forEach(channel => {
-      const overwrites = channel.permissionOverwrites?.cache;
-      channelData.push({
-        id: channel.id,
-        permissionOverwrites: overwrites ? overwrites.map(po => ({
-          id: po.id,
-          type: po.type,
-          allow: po.allow.bitfield.toString(),
-          deny: po.deny.bitfield.toString()
-        })) : []
-      });
+      // Nur Kanäle mit echten Rechten sichern (Kategorien/Texte/Voice)
+      if (channel.permissionOverwrites) {
+        const overwrites = channel.permissionOverwrites.cache;
+        channelData.push({
+          id: channel.id,
+          permissionOverwrites: overwrites ? overwrites.map(po => ({
+            id: po.id,
+            type: po.type,
+            allow: po.allow.bitfield.toString(),
+            deny: po.deny.bitfield.toString()
+          })) : []
+        });
+      }
     });
 
-    // Snapshot unzerstörbar auf Railway sichern
+    // 2. LEVEL 3 SPEZIAL: Einladungen sichern und löschen
+    let savedInvites = [];
+    if (level >= 3) {
+      try {
+        const invites = await guild.invites.fetch();
+        savedInvites = invites.map(inv => ({
+          code: inv.code,
+          channelId: inv.channelId,
+          uses: inv.uses,
+          maxUses: inv.maxUses,
+          maxAge: inv.maxAge,
+          temporary: inv.temporary,
+          inviterId: inv.inviter?.id
+        }));
+
+        for (const [_, invite] of invites) {
+          await invite.delete('🚨 Lockdown Level 3 aktiviert - Invites gelöscht');
+        }
+        console.log(`[LEVEL 3] ${invites.size} Einladungs-Links wurden gelöscht und gesichert.`);
+      } catch (err) {
+        console.error('Fehler beim Sichern/Löschen der Invites:', err.message);
+      }
+    }
+
     await pool.query(
       'INSERT INTO snapshots (incident_id, channels, roles) VALUES ($1, $2, $3)',
-      [incidentId, JSON.stringify(channelData), JSON.stringify(roleData)]
+      [incidentId, JSON.stringify(channelData), JSON.stringify(savedInvites)]
     );
 
-    // Aktiven Zustand in der DB vermerken (für Crash-Resistenz)
     await pool.query(
       `INSERT INTO active_lockdown (id, incident_id, level, reason) 
        VALUES (1, $1, $2, $3) 
@@ -40,50 +64,75 @@ class LockdownManager {
       [incidentId, level, reason]
     );
 
-    // Lockdown-Maßnahmen (Sperrung) anwenden
+    // 3. Einschränkungen anwenden
     await this.applyRestrictions(guild, level);
     return incidentId;
   }
 
-  // Kanäle für @everyone sperren
   async applyRestrictions(guild, level) {
-    const channels = guild.channels.cache.filter(c => c.isTextBased());
-    const allowedChannels = ['mod', 'admin', 'staff', 'bot-log', 'log'];
+    const channels = guild.channels.cache;
+    const allowedChannels = ['mod', 'admin', 'staff', 'bot-log', 'log', 'server-status'];
 
     for (const [_, ch] of channels) {
-      if (!allowedChannels.some(name => ch.name.toLowerCase().includes(name))) {
-        try {
+      // Sicherheits-Check: Hat der Kanal überhaupt das Permission-Objekt?
+      if (!ch.permissionOverwrites) continue;
+
+      // Team-Kanäle und den Status-Kanal ignorieren
+      if (allowedChannels.some(name => ch.name.toLowerCase().includes(name))) continue;
+
+      try {
+        // LEVEL 1: Textkanäle sperren
+        if (ch.isTextBased()) {
           await ch.permissionOverwrites.edit(guild.roles.everyone, {
             [PermissionFlagsBits.SendMessages]: false
           });
-        } catch (err) {
-          console.error(`Fehler beim Sperren von ${ch.name}:`, err.message);
         }
+
+        // LEVEL 2: Voice-Channels sperren
+        if (level >= 2 && ch.isVoiceBased()) {
+          await ch.permissionOverwrites.edit(guild.roles.everyone, {
+            [PermissionFlagsBits.Connect]: false
+          });
+        }
+
+        // LEVEL 3: Absoluter Riegel (Unsichtbar machen)
+        if (level >= 3) {
+          await ch.permissionOverwrites.edit(guild.roles.everyone, {
+            [PermissionFlagsBits.ViewChannel]: false,
+            [PermissionFlagsBits.CreateInstantInvite]: false
+          });
+        }
+      } catch (err) {
+        console.error(`Fehler beim Sperren von ${ch.name}:`, err.message);
+      }
+    }
+
+    if (level >= 3) {
+      try {
+        await guild.setVerificationLevel(4);
+      } catch (err) {
+        console.error('Fehler beim Ändern der Verifikationsstufe:', err.message);
       }
     }
   }
 
-  // RESTORE SYSTEM (1ZU1 RECHTE-WIEDERHERSTELLUNG FÜR JEDE ROLLE)
   async stopLockdown(guild) {
-    const activeRes = await pool.query('SELECT incident_id FROM active_lockdown WHERE id = 1');
+    const activeRes = await pool.query('SELECT incident_id, level FROM active_lockdown WHERE id = 1');
     if (activeRes.rows.length === 0) return false;
 
-    const incidentId = activeRes.rows[0].incident_id;
+    const { incident_id: incidentId, level } = activeRes.rows[0];
 
-    const snapshotRes = await pool.query('SELECT channels FROM snapshots WHERE incident_id = $1', [incidentId]);
+    const snapshotRes = await pool.query('SELECT channels, roles FROM snapshots WHERE incident_id = $1', [incidentId]);
     if (snapshotRes.rows.length === 0) return false;
 
     const savedChannels = JSON.parse(snapshotRes.rows[0].channels);
+    const savedInvites = JSON.parse(snapshotRes.rows[0].roles);
 
-    // Kanäle nacheinander wiederherstellen
     for (const savedChan of savedChannels) {
       const realChannel = guild.channels.cache.get(savedChan.id);
-      if (realChannel) {
+      if (realChannel && realChannel.permissionOverwrites) {
         try {
-          // Alle aktuellen Rechte auf dem Kanal komplett löschen
           await realChannel.permissionOverwrites.set([]);
-          
-          // Jede einzelne Rolle und Berechtigung aus der DB exakt neu setzen
           for (const overwrite of savedChan.permissionOverwrites) {
             await realChannel.permissionOverwrites.create(overwrite.id, {
               allow: BigInt(overwrite.allow),
@@ -96,7 +145,26 @@ class LockdownManager {
       }
     }
 
-    // Lockdown-Status aus DB löschen
+    if (level >= 3) {
+      try {
+        await guild.setVerificationLevel(1);
+        for (const inv of savedInvites) {
+          const channel = guild.channels.cache.get(inv.channelId);
+          if (channel) {
+            await channel.createInvite({
+              maxAge: inv.maxAge,
+              maxUses: inv.maxUses,
+              temporary: inv.temporary,
+              unique: true,
+              reason: 'Lockdown beendet - Invite wiederhergestellt'
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Fehler bei der Invite-Wiederherstellung:', err.message);
+      }
+    }
+
     await pool.query('DELETE FROM active_lockdown WHERE id = 1');
     return true;
   }
