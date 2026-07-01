@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, MessageFlags, AuditLogEvent } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, MessageFlags, AuditLogEvent, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { pool } = require('./database/db');
 const LockdownManager = require('./systems/lockdownManager');
 require('dotenv').config();
@@ -8,6 +8,36 @@ const client = new Client({
 });
 
 const lm = new LockdownManager(client);
+
+// Funktion, um den öffentlichen Status-Kanal zu erstellen/finden
+async function getOrCreateStatusChannel(guild) {
+  const channelName = 'server-status';
+  let channel = guild.channels.cache.find(c => c.name === channelName && c.isTextBased());
+  
+  if (!channel) {
+    try {
+      channel = await guild.channels.create({
+        name: channelName,
+        reason: 'Automatischer Status-Kanal für das Sicherheitssystem',
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            allow: [PermissionFlagsBits.ViewChannel],
+            deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.AddReactions]
+          },
+          {
+            id: client.user.id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]
+          }
+        ]
+      });
+      console.log(`✅ Kanal #${channelName} wurde erfolgreich erstellt.`);
+    } catch (err) {
+      console.error('Fehler beim Erstellen des Status-Kanals:', err.message);
+    }
+  }
+  return channel;
+}
 
 client.once('ready', async () => {
   console.log(`Bot eingeloggt als ${client.user.tag}`);
@@ -39,7 +69,6 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Multi-Owner Berechtigungsprüfung
   const isMainOwner = interaction.user.id === process.env.OWNER_ID;
   const isSecondOwner = interaction.user.id === process.env.SECOND_OWNER_ID;
 
@@ -51,6 +80,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   const guild = interaction.guild;
+  const statusChannel = await getOrCreateStatusChannel(guild);
 
   if (interaction.commandName === 'lockdown') {
     const level = interaction.options.getInteger('level');
@@ -60,7 +90,26 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.deferReply();
     const id = await lm.startLockdown(guild, level, reason);
-    await interaction.editReply(`🚨 **LOCKDOWN AKTIVIERT**\n**ID:** \`${id}\`\n**Stufe:** ${level}\n**Grund:** ${reason}`);
+    await interaction.editReply(`🚨 **LOCKDOWN AKTIVIERT**\n**ID:** \`${id}\``);
+
+    // Öffentliches Panel senden
+    if (statusChannel) {
+      const lockEmbed = new EmbedBuilder()
+        .setColor(0xFF0000) // Rot
+        .setTitle('🚨 SERVER LOCKDOWN AKTIVIERT 🚨')
+        .setDescription('Zum Schutz der Community wurden die Serverrechte temporär eingeschränkt.')
+        .addFields(
+          { name: '⏰ Wann:', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
+          { name: '🔒 Sicherheitsstufe:', value: `**Stufe ${level}**`, inline: true },
+          { name: '🛡️ Ausgeführt von:', value: `<@${interaction.user.id}>`, inline: true },
+          { name: '📝 Grund / Warum:', value: `\`\`\`${reason}\`\`\``, inline: false },
+          { name: 'ℹ️ Hinweis:', value: 'Die Server-Leitung ist bereits dabei, die Situation zu klären. Bitte habt etwas Geduld, der Server wird bald wieder normal geöffnet.' }
+        )
+        .setTimestamp()
+        .setFooter({ text: `Incident-ID: ${id}` });
+
+      await statusChannel.send({ embeds: [lockEmbed] });
+    }
   }
 
   if (interaction.commandName === 'unlock') {
@@ -69,7 +118,23 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply();
     const success = await lm.stopLockdown(guild);
     if (success) {
-      await interaction.editReply('🔓 **SERVER ENTSPERRT**\nAlle individuellen Rollen- und Kanalrechte wurden erfolgreich 1zu1 aus der Datenbank wiederhergestellt.');
+      await interaction.editReply('🔓 **SERVER ENTSPERRT**');
+
+      // Öffentliches Panel senden
+      if (statusChannel) {
+        const unlockEmbed = new EmbedBuilder()
+          .setColor(0x00FF00) // Grün
+          .setTitle('🔓 SERVER WIEDER GEÖFFNET 🔓')
+          .setDescription('Der Lockdown wurde beendet. Alle Funktionen und Kanäle stehen euch wieder wie gewohnt zur Verfügung!')
+          .addFields(
+            { name: '⏰ Wann:', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
+            { name: '🛡️ Aufgehoben von:', value: `<@${interaction.user.id}>`, inline: true },
+            { name: '✅ Status:', value: 'Alle Kanäle und Einladungslinks wurden erfolgreich 1zu1 wiederhergestellt.', inline: false }
+          )
+          .setTimestamp();
+
+        await statusChannel.send({ embeds: [unlockEmbed] });
+      }
     } else {
       await interaction.editReply('❌ Fehler bei der Wiederherstellung des Snapshots.');
     }
@@ -97,7 +162,6 @@ client.on('channelDelete', async (channel) => {
     if (!deletionLog) return;
     const { executor } = deletionLog;
 
-    // Ignoriere Aktionen von beiden Owners und dem Bot selbst
     if (executor.id === process.env.OWNER_ID || executor.id === process.env.SECOND_OWNER_ID || executor.id === client.user.id) return;
 
     console.log(`[WARNUNG] Kanal #${channel.name} wurde von ${executor.tag} gelöscht!`);
