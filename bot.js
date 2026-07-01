@@ -12,7 +12,6 @@ const lm = new LockdownManager(client);
 client.once('ready', async () => {
   console.log(`Bot eingeloggt als ${client.user.tag}`);
   
-  // Slash-Commands registrieren
   const commands = [
     new SlashCommandBuilder()
       .setName('lockdown')
@@ -40,9 +39,16 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Zugriffsschutz: Nur die hinterlegte Owner-ID darf das System steuern
-  const isOwner = interaction.user.id === process.env.OWNER_ID;
-  if (!isOwner) return interaction.reply({ content: '❌ Zugriff verweigert. Nur der Serverbesitzer darf das System steuern.', flags: [MessageFlags.Ephemeral] });
+  // Multi-Owner Berechtigungsprüfung
+  const isMainOwner = interaction.user.id === process.env.OWNER_ID;
+  const isSecondOwner = interaction.user.id === process.env.SECOND_OWNER_ID;
+
+  if (!isMainOwner && !isSecondOwner) {
+    return interaction.reply({ 
+      content: '❌ Zugriff verweigert. Nur die beiden hinterlegten Serverbesitzer dürfen das System steuern.', 
+      flags: [MessageFlags.Ephemeral] 
+    });
+  }
 
   const guild = interaction.guild;
 
@@ -85,19 +91,17 @@ client.on('channelDelete', async (channel) => {
   if (guild.id !== process.env.GUILD_ID) return;
 
   try {
-    // Wer hat den Kanal gelöscht?
     const fetchedLogs = await guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.ChannelDelete });
     const deletionLog = fetchedLogs.entries.first();
     
     if (!deletionLog) return;
     const { executor } = deletionLog;
 
-    // Ignoriere den Bot selbst und den Server-Owner
-    if (executor.id === process.env.OWNER_ID || executor.id === client.user.id) return;
+    // Ignoriere Aktionen von beiden Owners und dem Bot selbst
+    if (executor.id === process.env.OWNER_ID || executor.id === process.env.SECOND_OWNER_ID || executor.id === client.user.id) return;
 
     console.log(`[WARNUNG] Kanal #${channel.name} wurde von ${executor.tag} gelöscht!`);
 
-    // Warnmeldung in den Log-Kanal senden
     const logChannel = guild.channels.cache.get(process.env.LOG_CHANNEL_ID);
     if (logChannel && logChannel.isTextBased()) {
       await logChannel.send({
