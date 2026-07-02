@@ -17,34 +17,24 @@ class LockdownManager {
     const res = await pool.query(
       'SELECT * FROM active_lockdown WHERE id = 1'
     );
-
-    if (!res.rows.length) return null;
-
-    return res.rows[0];
+    return res.rows.length ? res.rows[0] : null;
   }
 
   async startLockdown(guild, level, reason) {
     const incidentId = `INC-${Date.now()}`;
     const snapshot = [];
 
-    // Vollständigen Originalzustand speichern
     for (const [, channel] of guild.channels.cache) {
       if (!channel.permissionOverwrites) continue;
 
-      const overwrites = [];
-
-      for (const [, po] of channel.permissionOverwrites.cache) {
-        overwrites.push({
+      snapshot.push({
+        channelId: channel.id,
+        overwrites: channel.permissionOverwrites.cache.map(po => ({
           id: po.id,
           type: po.type,
           allow: po.allow.bitfield.toString(),
           deny: po.deny.bitfield.toString()
-        });
-      }
-
-      snapshot.push({
-        channelId: channel.id,
-        overwrites
+        }))
       });
     }
 
@@ -54,77 +44,73 @@ class LockdownManager {
     );
 
     await pool.query(
-      `
-      INSERT INTO active_lockdown (id, incident_id, level, reason)
-      VALUES (1,$1,$2,$3)
-      ON CONFLICT (id)
-      DO UPDATE SET incident_id=$1, level=$2, reason=$3
-      `,
+      `INSERT INTO active_lockdown (id, incident_id, level, reason)
+       VALUES (1,$1,$2,$3)
+       ON CONFLICT (id)
+       DO UPDATE SET incident_id=$1, level=$2, reason=$3`,
       [incidentId, level, reason]
     );
 
-    await this.applyFullLockdown(guild, level);
+    await this.applyLockdown(guild, level);
 
     return incidentId;
   }
 
-  async applyFullLockdown(guild, level) {
+  async applyLockdown(guild, level) {
     const protectedChannels = [
-      'server-status',
       'allgemein',
       'general',
       'support',
-      'hilfe'
+      'hilfe',
+      'server-status'
     ];
 
     for (const [, channel] of guild.channels.cache) {
       if (!channel.permissionOverwrites) continue;
 
-      // Onboarding-Kanäle schützen
       if (
-        protectedChannels.some(name =>
-          channel.name.toLowerCase().includes(name)
+        protectedChannels.some(n =>
+          channel.name.toLowerCase().includes(n)
         )
-      ) {
-        continue;
-      }
+      ) continue;
 
       try {
-        const updatedOverwrites = [];
+        const updated = [];
 
-        for (const [, overwrite] of channel.permissionOverwrites.cache) {
-          let allow = BigInt(overwrite.allow.bitfield);
-          let deny = BigInt(overwrite.deny.bitfield);
+        for (const [, o] of channel.permissionOverwrites.cache) {
+          let allow = BigInt(o.allow.bitfield);
+          let deny = BigInt(o.deny.bitfield);
+
+          const S = BigInt(PermissionFlagsBits.SendMessages);
+          const C = BigInt(PermissionFlagsBits.Connect);
+          const V = BigInt(PermissionFlagsBits.ViewChannel);
 
           if (level >= 1) {
-            allow &= ~BigInt(PermissionFlagsBits.SendMessages);
-            deny |= BigInt(PermissionFlagsBits.SendMessages);
+            allow &= ~S;
+            deny |= S;
           }
 
           if (level >= 2) {
-            allow &= ~BigInt(PermissionFlagsBits.Connect);
-            deny |= BigInt(PermissionFlagsBits.Connect);
+            allow &= ~C;
+            deny |= C;
           }
 
           if (level >= 3) {
-            allow &= ~BigInt(PermissionFlagsBits.ViewChannel);
-            deny |= BigInt(PermissionFlagsBits.ViewChannel);
+            allow &= ~V;
+            deny |= V;
           }
 
-          updatedOverwrites.push({
-            id: overwrite.id,
-            type: overwrite.type,
+          updated.push({
+            id: o.id,
+            type: o.type,
             allow,
             deny
           });
         }
 
-        await channel.permissionOverwrites.set(updatedOverwrites);
+        await channel.permissionOverwrites.set(updated);
       } catch (err) {
-        console.error(
-          `Lockdown Fehler ${channel.name}:`,
-          err.message
-        );
+        console.error(`Lock Fehler ${channel.name}:`, err.message);
       }
     }
   }
@@ -141,31 +127,25 @@ class LockdownManager {
 
     for (const saved of snapshot) {
       const channel = guild.channels.cache.get(saved.channelId);
-
       if (!channel) continue;
 
       try {
-        // Erst komplett löschen
+        // komplett reset
         await channel.permissionOverwrites.set([]);
 
-        // Dann Originalzustand exakt wiederherstellen
-        const originalOverwrites = saved.overwrites.map(po => ({
-          id: po.id,
-          type: po.type,
-          allow: BigInt(po.allow),
-          deny: BigInt(po.deny)
+        const restored = saved.overwrites.map(o => ({
+          id: o.id,
+          type: o.type,
+          allow: BigInt(o.allow),
+          deny: BigInt(o.deny)
         }));
 
-        await channel.permissionOverwrites.set(originalOverwrites);
+        await channel.permissionOverwrites.set(restored);
       } catch (err) {
-        console.error(
-          `Restore Fehler ${channel.name}:`,
-          err.message
-        );
+        console.error(`Restore Fehler ${channel.name}:`, err.message);
       }
     }
 
-    // Lockdown aus DB entfernen
     await pool.query('DELETE FROM active_lockdown');
     await pool.query('DELETE FROM snapshots');
 
