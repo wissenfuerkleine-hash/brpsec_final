@@ -14,79 +14,129 @@ const { pool } = require('./database/db');
 const LockdownManager = require('./systems/lockdownManager');
 require('dotenv').config();
 
+const requiredEnv = [
+  'DISCORD_TOKEN',
+  'CLIENT_ID',
+  'GUILD_ID',
+  'DATABASE_URL',
+  'OWNER_ID',
+  'SECOND_OWNER_ID',
+  'LOG_CHANNEL_ID'
+];
+
+for (const envVar of requiredEnv) {
+  if (!process.env[envVar]) {
+    throw new Error(`❌ Fehlende ENV Variable: ${envVar}`);
+  }
+}
+
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildModeration]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildModeration
+  ]
 });
 
 const lm = new LockdownManager(client);
 
 async function getOrCreateStatusChannel(guild) {
-  let ch = guild.channels.cache.find(c => c.name === 'server-status');
+  let channel = guild.channels.cache.find(
+    c => c.name === 'server-status' && c.isTextBased()
+  );
 
-  if (!ch) {
-    ch = await guild.channels.create({
-      name: 'server-status',
-      permissionOverwrites: [
-        {
-          id: guild.roles.everyone.id,
-          allow: [PermissionFlagsBits.ViewChannel],
-          deny: [PermissionFlagsBits.SendMessages]
-        },
-        {
-          id: client.user.id,
-          allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-        }
-      ]
-    });
+  if (!channel) {
+    try {
+      channel = await guild.channels.create({
+        name: 'server-status',
+        reason: 'Automatischer Sicherheitsstatus-Kanal',
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            allow: [PermissionFlagsBits.ViewChannel],
+            deny: [
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.AddReactions
+            ]
+          },
+          {
+            id: client.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          }
+        ]
+      });
+
+      console.log('✅ Status-Kanal erstellt');
+    } catch (err) {
+      console.error('Fehler beim Erstellen des Status-Kanals:', err.message);
+    }
   }
 
-  return ch;
+  return channel;
 }
 
-client.once('ready', async () => {
-  console.log(`Bot online: ${client.user.tag}`);
+client.once('clientReady', async () => {
+  console.log(`✅ Bot online: ${client.user.tag}`);
 
   const commands = [
     new SlashCommandBuilder()
       .setName('lockdown')
-      .setDescription('Server sperren')
-      .addIntegerOption(o =>
-        o.setName('level').setRequired(true)
+      .setDescription('Sperrt den Server')
+      .addIntegerOption(option =>
+        option
+          .setName('level')
+          .setDescription('Lockdown Stufe (1-3)')
+          .setRequired(true)
       )
-      .addStringOption(o =>
-        o.setName('reason').setRequired(true)
+      .addStringOption(option =>
+        option
+          .setName('reason')
+          .setDescription('Grund für den Lockdown')
+          .setRequired(true)
       ),
 
     new SlashCommandBuilder()
       .setName('unlock')
-      .setDescription('Server wiederherstellen'),
+      .setDescription('Hebt den Lockdown auf'),
 
     new SlashCommandBuilder()
       .setName('status')
-      .setDescription('Status anzeigen')
+      .setDescription('Zeigt den aktuellen Status')
   ];
 
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
-  await rest.put(
-    Routes.applicationGuildCommands(
-      process.env.CLIENT_ID,
-      process.env.GUILD_ID
-    ),
-    { body: commands }
+  const rest = new REST({ version: '10' }).setToken(
+    process.env.DISCORD_TOKEN
   );
+
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      {
+        body: commands.map(cmd => cmd.toJSON())
+      }
+    );
+
+    console.log('🚀 Slash Commands registriert');
+  } catch (err) {
+    console.error('Fehler bei Slash Commands:', err);
+  }
 });
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const isOwner =
-    interaction.user.id === process.env.OWNER_ID ||
-    interaction.user.id === process.env.SECOND_OWNER_ID;
+  const isMainOwner = interaction.user.id === process.env.OWNER_ID;
+  const isSecondOwner = interaction.user.id === process.env.SECOND_OWNER_ID;
 
-  if (!isOwner) {
+  if (!isMainOwner && !isSecondOwner) {
     return interaction.reply({
-      content: 'Kein Zugriff',
+      content: '❌ Zugriff verweigert.',
       flags: [MessageFlags.Ephemeral]
     });
   }
@@ -94,81 +144,165 @@ client.on('interactionCreate', async interaction => {
   const guild = interaction.guild;
   const statusChannel = await getOrCreateStatusChannel(guild);
 
-  await interaction.deferReply();
+  if (
+    interaction.commandName === 'lockdown' ||
+    interaction.commandName === 'unlock'
+  ) {
+    await interaction.deferReply();
+  }
 
   if (interaction.commandName === 'lockdown') {
     const level = interaction.options.getInteger('level');
     const reason = interaction.options.getString('reason');
 
     if (await lm.isLocked()) {
-      return interaction.editReply('Schon aktiv');
+      return interaction.editReply(
+        '❌ Es läuft bereits ein Lockdown.'
+      );
     }
 
-    const id = await lm.startLockdown(guild, level, reason);
+    const incidentId = await lm.startLockdown(
+      guild,
+      level,
+      reason
+    );
 
-    await interaction.editReply(`Lockdown aktiv: ${id}`);
+    await interaction.editReply(
+      `🚨 Lockdown aktiviert\nID: ${incidentId}`
+    );
+
+    if (statusChannel) {
+      const embed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('🚨 LOCKDOWN AKTIV')
+        .setDescription(
+          'Serverrechte wurden vorübergehend eingeschränkt.'
+        )
+        .addFields(
+          {
+            name: 'Stufe',
+            value: `${level}`,
+            inline: true
+          },
+          {
+            name: 'Grund',
+            value: reason,
+            inline: false
+          },
+          {
+            name: 'Von',
+            value: `<@${interaction.user.id}>`,
+            inline: true
+          }
+        )
+        .setTimestamp();
+
+      await statusChannel.send({
+        embeds: [embed]
+      });
+    }
   }
 
   if (interaction.commandName === 'unlock') {
     const status = await lm.checkStatus();
 
     if (!status) {
-      return interaction.editReply('Kein Lockdown aktiv');
+      return interaction.editReply(
+        '✅ Kein Lockdown aktiv.'
+      );
     }
 
-    const success = await lm.restoreSnapshot(guild, status.incident_id);
+    const success = await lm.restoreSnapshot(
+      guild,
+      status.incident_id
+    );
 
     if (success) {
       await pool.query('DELETE FROM active_lockdown');
       await pool.query('DELETE FROM snapshots');
 
-      return interaction.editReply('Server wiederhergestellt');
-    }
+      await interaction.editReply(
+        '🔓 Server erfolgreich wiederhergestellt.'
+      );
 
-    return interaction.editReply('Restore fehlgeschlagen');
+      if (statusChannel) {
+        const embed = new EmbedBuilder()
+          .setColor(0x00ff00)
+          .setTitle('🔓 LOCKDOWN BEENDET')
+          .setDescription(
+            'Alle Rechte wurden wiederhergestellt.'
+          )
+          .setTimestamp();
+
+        await statusChannel.send({
+          embeds: [embed]
+        });
+      }
+    } else {
+      await interaction.editReply(
+        '❌ Snapshot konnte nicht wiederhergestellt werden.'
+      );
+    }
   }
 
   if (interaction.commandName === 'status') {
     const status = await lm.checkStatus();
 
     if (!status) {
-      return interaction.reply('Alles normal');
+      return interaction.reply(
+        '✅ Status normal. Kein Lockdown aktiv.'
+      );
     }
 
     return interaction.reply(
-      `LOCKDOWN\nID: ${status.incident_id}\nLevel: ${status.level}`
+      `🔒 Lockdown aktiv\nID: ${status.incident_id}\nStufe: ${status.level}\nGrund: ${status.reason}`
     );
   }
 });
 
 client.on('channelDelete', async channel => {
+  const guild = channel.guild;
+
+  if (guild.id !== process.env.GUILD_ID) return;
+
   try {
-    const logs = await channel.guild.fetchAuditLogs({
+    const logs = await guild.fetchAuditLogs({
       limit: 1,
       type: AuditLogEvent.ChannelDelete
     });
 
     const entry = logs.entries.first();
+
     if (!entry) return;
 
-    const user = entry.executor;
-    if (!user) return;
+    const executor = entry.executor;
 
     if (
-      user.id === process.env.OWNER_ID ||
-      user.id === process.env.SECOND_OWNER_ID
-    )
+      executor.id === process.env.OWNER_ID ||
+      executor.id === process.env.SECOND_OWNER_ID ||
+      executor.id === client.user.id
+    ) {
       return;
+    }
 
-    const logChannel = channel.guild.channels.cache.get(
+    console.log(
+      `⚠ Kanal gelöscht: ${channel.name} von ${executor.tag}`
+    );
+
+    const logChannel = guild.channels.cache.get(
       process.env.LOG_CHANNEL_ID
     );
 
-    if (logChannel) {
-      logChannel.send(`⚠ Kanal gelöscht: ${channel.name}`);
+    if (logChannel && logChannel.isTextBased()) {
+      await logChannel.send(
+        `⚠ Sicherheitswarnung!\nKanal gelöscht: #${channel.name}\nVon: <@${executor.id}>`
+      );
     }
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(
+      'AuditLog Fehler:',
+      err.message
+    );
   }
 });
 
