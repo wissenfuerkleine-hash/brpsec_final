@@ -7,12 +7,17 @@ class LockdownManager {
   }
 
   async isLocked() {
-    const res = await pool.query('SELECT * FROM active_lockdown WHERE id = 1');
+    const res = await pool.query(
+      'SELECT * FROM active_lockdown WHERE id = 1'
+    );
     return res.rows.length > 0;
   }
 
   async checkStatus() {
-    const res = await pool.query('SELECT * FROM active_lockdown WHERE id = 1');
+    const res = await pool.query(
+      'SELECT * FROM active_lockdown WHERE id = 1'
+    );
+
     if (res.rows.length === 0) return null;
     return res.rows[0];
   }
@@ -20,13 +25,13 @@ class LockdownManager {
   async startLockdown(guild, level, reason) {
     const incidentId = `INC-${Date.now()}`;
 
-    const channelData = [];
+    const snapshot = [];
 
-    guild.channels.cache.forEach(channel => {
-      if (!channel.permissionOverwrites) return;
+    for (const [, channel] of guild.channels.cache) {
+      if (!channel.permissionOverwrites) continue;
 
-      channelData.push({
-        id: channel.id,
+      snapshot.push({
+        channelId: channel.id,
         overwrites: channel.permissionOverwrites.cache.map(po => ({
           id: po.id,
           type: po.type,
@@ -34,85 +39,104 @@ class LockdownManager {
           deny: po.deny.bitfield.toString()
         }))
       });
-    });
+    }
 
     await pool.query(
-      'INSERT INTO snapshots (incident_id, channels, roles) VALUES ($1, $2, $3)',
-      [incidentId, JSON.stringify(channelData), JSON.stringify([])]
+      'INSERT INTO snapshots (incident_id, channels, roles) VALUES ($1,$2,$3)',
+      [incidentId, JSON.stringify(snapshot), JSON.stringify([])]
     );
 
     await pool.query(
-      `INSERT INTO active_lockdown (id, incident_id, level, reason)
-       VALUES (1, $1, $2, $3)
-       ON CONFLICT (id)
-       DO UPDATE SET incident_id=$1, level=$2, reason=$3`,
+      `
+      INSERT INTO active_lockdown (id, incident_id, level, reason)
+      VALUES (1,$1,$2,$3)
+      ON CONFLICT (id)
+      DO UPDATE SET incident_id=$1, level=$2, reason=$3
+      `,
       [incidentId, level, reason]
     );
 
-    await this.applyRestrictions(guild, level);
+    await this.applyFullLockdown(guild, level);
 
     return incidentId;
   }
 
-  async applyRestrictions(guild, level) {
-    const channels = guild.channels.cache;
-
-    const ignore = ['mod', 'admin', 'staff', 'log', 'bot'];
-
-    for (const [, ch] of channels) {
-      if (!ch.isTextBased() && !ch.isVoiceBased()) continue;
-      if (ignore.some(n => ch.name.toLowerCase().includes(n))) continue;
+  async applyFullLockdown(guild, level) {
+    for (const [, channel] of guild.channels.cache) {
+      if (!channel.permissionOverwrites) continue;
 
       try {
-        if (ch.isTextBased()) {
-          await ch.permissionOverwrites.edit(guild.roles.everyone, {
-            SendMessages: false
+        const newOverwrites = [];
+
+        for (const [, overwrite] of channel.permissionOverwrites.cache) {
+          let deny = BigInt(overwrite.deny.bitfield);
+          let allow = BigInt(overwrite.allow.bitfield);
+
+          if (level >= 1) {
+            deny |= BigInt(PermissionFlagsBits.SendMessages);
+          }
+
+          if (level >= 2) {
+            deny |= BigInt(PermissionFlagsBits.Connect);
+          }
+
+          if (level >= 3) {
+            deny |= BigInt(PermissionFlagsBits.ViewChannel);
+          }
+
+          newOverwrites.push({
+            id: overwrite.id,
+            type: overwrite.type,
+            allow,
+            deny
           });
         }
 
-        if (level >= 2 && ch.isVoiceBased()) {
-          await ch.permissionOverwrites.edit(guild.roles.everyone, {
-            Connect: false
-          });
-        }
-
-        if (level >= 3) {
-          await ch.permissionOverwrites.edit(guild.roles.everyone, {
-            ViewChannel: false
-          });
-        }
+        await channel.permissionOverwrites.set(newOverwrites);
       } catch (err) {
-        console.error(`Lock Fehler ${ch.name}:`, err.message);
+        console.error(
+          `Lockdown Fehler ${channel.name}:`,
+          err.message
+        );
       }
     }
   }
 
   async restoreSnapshot(guild, incidentId) {
     const res = await pool.query(
-      'SELECT * FROM snapshots WHERE incident_id=$1',
+      'SELECT * FROM snapshots WHERE incident_id = $1',
       [incidentId]
     );
 
     if (res.rows.length === 0) return false;
 
-    const snapshot = res.rows[0];
-    const channels = JSON.parse(snapshot.channels);
+    const snapshot = JSON.parse(res.rows[0].channels);
 
-    for (const chData of channels) {
-      const channel = guild.channels.cache.get(chData.id);
+    for (const savedChannel of snapshot) {
+      const channel = guild.channels.cache.get(
+        savedChannel.channelId
+      );
+
       if (!channel) continue;
 
       try {
-        const overwrites = chData.overwrites.map(o => ({
-          id: o.id,
-          allow: BigInt(o.allow),
-          deny: BigInt(o.deny),
-          type: o.type
-        }));
+        const restoredOverwrites = savedChannel.overwrites.map(
+          overwrite => ({
+            id: overwrite.id,
+            type: overwrite.type,
+            allow: BigInt(overwrite.allow),
+            deny: BigInt(overwrite.deny)
+          })
+        );
 
-        await channel.permissionOverwrites.set(overwrites);
+        await channel.permissionOverwrites.set(
+          restoredOverwrites
+        );
       } catch (err) {
-        console.error(`Restore Fehler ${channel.name}:`, err.message);
+        console.error(
+          `Restore Fehler ${channel.name}:`,
+          err.message
+        );
       }
     }
 
