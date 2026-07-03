@@ -3,54 +3,94 @@ const {
   GatewayIntentBits,
   SlashCommandBuilder,
   REST,
-  Routes
+  Routes,
+  PermissionFlagsBits
 } = require('discord.js');
+
+const { pool } = require('./database/db');
+const LockdownManager = require('./systems/lockdownManager');
 
 require('dotenv').config();
 
-const LockdownManager = require('./systems/lockdownManager');
-
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildModeration
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 const lm = new LockdownManager(client);
 
-client.once('ready', async () => {
-  console.log(`✅ Bot online: ${client.user.tag}`);
+let panelChannel = null;
 
+client.once('ready', async () => {
+  console.log(`🤖 Bot online: ${client.user.tag}`);
+
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (!guild) {
+    console.log('❌ Guild nicht gefunden');
+    return;
+  }
+
+  // 📌 PANEL CHANNEL ERSTELLEN / FINDEN
+  panelChannel = guild.channels.cache.find(
+    c => c.name === 'server-status'
+  );
+
+  if (!panelChannel) {
+    try {
+      panelChannel = await guild.channels.create({
+        name: 'server-status',
+        type: 0,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            allow: [PermissionFlagsBits.ViewChannel],
+            deny: [PermissionFlagsBits.SendMessages]
+          },
+          {
+            id: client.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages
+            ]
+          }
+        ]
+      });
+
+      console.log('📌 Panel-Channel erstellt');
+    } catch (err) {
+      console.error('Fehler Panel:', err.message);
+    }
+  }
+
+  // 📊 Status Nachricht
+  try {
+    await panelChannel.send(
+      '🛡️ **Security System aktiv**\n' +
+      'Commands: /status | /lockdown | /unlock'
+    );
+  } catch {}
+
+  // SLASH COMMANDS
   const commands = [
     new SlashCommandBuilder()
       .setName('lockdown')
-      .setDescription('Sperrt den Server')
-      .addIntegerOption(option =>
-        option
-          .setName('level')
-          .setDescription('Lockdown Level (1-3)')
-          .setRequired(true)
+      .setDescription('Server sperren')
+      .addIntegerOption(o =>
+        o.setName('level').setRequired(true).setDescription('1-3')
       )
-      .addStringOption(option =>
-        option
-          .setName('reason')
-          .setDescription('Grund für den Lockdown')
-          .setRequired(true)
+      .addStringOption(o =>
+        o.setName('reason').setRequired(true).setDescription('Grund')
       ),
 
     new SlashCommandBuilder()
       .setName('unlock')
-      .setDescription('Stellt den Server wieder her'),
+      .setDescription('Server entsperren'),
 
     new SlashCommandBuilder()
       .setName('status')
-      .setDescription('Zeigt den aktuellen Status')
+      .setDescription('Server Status anzeigen')
   ];
 
-  const rest = new REST({ version: '10' }).setToken(
-    process.env.DISCORD_TOKEN
-  );
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
   try {
     await rest.put(
@@ -58,9 +98,7 @@ client.once('ready', async () => {
         process.env.CLIENT_ID,
         process.env.GUILD_ID
       ),
-      {
-        body: commands.map(cmd => cmd.toJSON())
-      }
+      { body: commands.map(c => c.toJSON()) }
     );
 
     console.log('🚀 Slash Commands registriert');
@@ -72,102 +110,64 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const isMainOwner =
-    interaction.user.id === process.env.OWNER_ID;
-
-  const isSecondOwner =
-    interaction.user.id === process.env.SECOND_OWNER_ID;
-
-  if (!isMainOwner && !isSecondOwner) {
-    return interaction.reply({
-      content:
-        '❌ Keine Berechtigung für dieses Sicherheitssystem.',
-      ephemeral: true
-    });
-  }
-
   const guild = interaction.guild;
 
-  try {
-    // LOCKDOWN
-    if (interaction.commandName === 'lockdown') {
-      await interaction.deferReply();
+  // 🔒 LOCKDOWN
+  if (interaction.commandName === 'lockdown') {
+    await interaction.deferReply();
 
-      const level = interaction.options.getInteger('level');
-      const reason = interaction.options.getString('reason');
+    const level = interaction.options.getInteger('level');
+    const reason = interaction.options.getString('reason');
 
-      if (await lm.isLocked()) {
-        return interaction.editReply(
-          '❌ Lockdown ist bereits aktiv.'
-        );
-      }
+    const already = await lm.isLocked();
+    if (already) {
+      return interaction.editReply('❌ Lockdown bereits aktiv');
+    }
 
-      const incidentId = await lm.startLockdown(
-        guild,
-        level,
-        reason
-      );
+    const id = await lm.startLockdown(guild, level, reason);
 
-      return interaction.editReply(
-        `🚨 Lockdown aktiviert\nID: ${incidentId}`
+    if (panelChannel) {
+      panelChannel.send(
+        `🚨 LOCKDOWN AKTIV\nLevel: ${level}\nGrund: ${reason}`
       );
     }
 
-    // UNLOCK
-    if (interaction.commandName === 'unlock') {
-      await interaction.deferReply();
+    return interaction.editReply(`🚨 Lockdown gestartet: ${id}`);
+  }
 
-      const status = await lm.checkStatus();
+  // 🔓 UNLOCK
+  if (interaction.commandName === 'unlock') {
+    await interaction.deferReply();
 
-      if (!status) {
-        return interaction.editReply(
-          '✅ Kein Lockdown aktiv.'
-        );
-      }
+    const status = await lm.checkStatus();
 
-      const restored = await lm.restoreSnapshot(
-        guild,
-        status.incident_id
-      );
-
-      if (!restored) {
-        return interaction.editReply(
-          '❌ Snapshot konnte nicht wiederhergestellt werden.'
-        );
-      }
-
-      return interaction.editReply(
-        '🔓 Server erfolgreich wiederhergestellt.'
-      );
+    if (!status) {
+      return interaction.editReply('✅ Kein Lockdown aktiv');
     }
 
-    // STATUS
-    if (interaction.commandName === 'status') {
-      const status = await lm.checkStatus();
+    const ok = await lm.restoreSnapshot(
+      guild,
+      status.incident_id
+    );
 
-      if (!status) {
-        return interaction.reply(
-          '✅ Status: Normal (kein Lockdown aktiv)'
-        );
-      }
-
-      return interaction.reply(
-        `🔒 Lockdown aktiv\nID: ${status.incident_id}\nLevel: ${status.level}\nGrund: ${status.reason}`
-      );
+    if (panelChannel) {
+      panelChannel.send('🔓 Server entsperrt');
     }
-  } catch (err) {
-    console.error('Interaction Fehler:', err.message);
 
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(
-        '❌ Ein Fehler ist aufgetreten.'
-      );
-    } else {
-      await interaction.reply({
-        content: '❌ Ein Fehler ist aufgetreten.',
-        ephemeral: true
-      });
-    }
+    return interaction.editReply(
+      ok ? '🔓 Restore fertig' : '❌ Fehler beim Restore'
+    );
+  }
+
+  // 📊 STATUS
+  if (interaction.commandName === 'status') {
+    const s = await lm.checkStatus();
+
+    return interaction.reply(
+      s
+        ? `🔒 LOCKDOWN aktiv\nLevel: ${s.level}\nGrund: ${s.reason}`
+        : '✅ Server normal'
+    );
   }
 });
 
