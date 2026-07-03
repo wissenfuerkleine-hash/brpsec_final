@@ -7,10 +7,10 @@ const {
   PermissionFlagsBits
 } = require('discord.js');
 
-const { pool } = require('./database/db');
-const LockdownManager = require('./systems/lockdownManager');
-
 require('dotenv').config();
+
+const { pool } = require('../database/db');
+const LockdownManager = require('./systems/lockdownManager');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
@@ -24,50 +24,34 @@ client.once('ready', async () => {
   console.log(`🤖 Bot online: ${client.user.tag}`);
 
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
-  if (!guild) {
-    console.log('❌ Guild nicht gefunden');
-    return;
-  }
+  if (!guild) return;
 
-  // 📌 PANEL CHANNEL ERSTELLEN / FINDEN
-  panelChannel = guild.channels.cache.find(
-    c => c.name === 'server-status'
-  );
+  // 📌 PANEL CHANNEL
+  panelChannel = guild.channels.cache.find(c => c.name === 'server-status');
 
   if (!panelChannel) {
-    try {
-      panelChannel = await guild.channels.create({
-        name: 'server-status',
-        type: 0,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            allow: [PermissionFlagsBits.ViewChannel],
-            deny: [PermissionFlagsBits.SendMessages]
-          },
-          {
-            id: client.user.id,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages
-            ]
-          }
-        ]
-      });
+    panelChannel = await guild.channels.create({
+      name: 'server-status',
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          allow: [PermissionFlagsBits.ViewChannel],
+          deny: [PermissionFlagsBits.SendMessages]
+        },
+        {
+          id: client.user.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages
+          ]
+        }
+      ]
+    });
 
-      console.log('📌 Panel-Channel erstellt');
-    } catch (err) {
-      console.error('Fehler Panel:', err.message);
-    }
+    console.log("📌 Panel erstellt");
   }
 
-  // 📊 Status Nachricht
-  try {
-    await panelChannel.send(
-      '🛡️ **Security System aktiv**\n' +
-      'Commands: /status | /lockdown | /unlock'
-    );
-  } catch {}
+  await panelChannel.send("🛡 Security System aktiv");
 
   // SLASH COMMANDS
   const commands = [
@@ -75,10 +59,10 @@ client.once('ready', async () => {
       .setName('lockdown')
       .setDescription('Server sperren')
       .addIntegerOption(o =>
-        o.setName('level').setRequired(true).setDescription('1-3')
+        o.setName('level').setRequired(true)
       )
       .addStringOption(o =>
-        o.setName('reason').setRequired(true).setDescription('Grund')
+        o.setName('reason').setRequired(true)
       ),
 
     new SlashCommandBuilder()
@@ -87,24 +71,18 @@ client.once('ready', async () => {
 
     new SlashCommandBuilder()
       .setName('status')
-      .setDescription('Server Status anzeigen')
+      .setDescription('Status anzeigen')
   ];
 
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
-      ),
-      { body: commands.map(c => c.toJSON()) }
-    );
-
-    console.log('🚀 Slash Commands registriert');
-  } catch (err) {
-    console.error('Command Fehler:', err.message);
-  }
+  await rest.put(
+    Routes.applicationGuildCommands(
+      process.env.CLIENT_ID,
+      process.env.GUILD_ID
+    ),
+    { body: commands.map(c => c.toJSON()) }
+  );
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -112,37 +90,31 @@ client.on('interactionCreate', async (interaction) => {
 
   const guild = interaction.guild;
 
-  // 🔒 LOCKDOWN
   if (interaction.commandName === 'lockdown') {
     await interaction.deferReply();
 
     const level = interaction.options.getInteger('level');
     const reason = interaction.options.getString('reason');
 
-    const already = await lm.isLocked();
-    if (already) {
-      return interaction.editReply('❌ Lockdown bereits aktiv');
+    if (await lm.isLocked()) {
+      return interaction.editReply("❌ Already locked");
     }
 
     const id = await lm.startLockdown(guild, level, reason);
 
     if (panelChannel) {
-      panelChannel.send(
-        `🚨 LOCKDOWN AKTIV\nLevel: ${level}\nGrund: ${reason}`
-      );
+      panelChannel.send(`🚨 LOCKDOWN ${level} aktiv`);
     }
 
-    return interaction.editReply(`🚨 Lockdown gestartet: ${id}`);
+    return interaction.editReply(`🚨 gestartet: ${id}`);
   }
 
-  // 🔓 UNLOCK
   if (interaction.commandName === 'unlock') {
     await interaction.deferReply();
 
     const status = await lm.checkStatus();
-
     if (!status) {
-      return interaction.editReply('✅ Kein Lockdown aktiv');
+      return interaction.editReply("✅ kein Lockdown");
     }
 
     const ok = await lm.restoreSnapshot(
@@ -151,22 +123,19 @@ client.on('interactionCreate', async (interaction) => {
     );
 
     if (panelChannel) {
-      panelChannel.send('🔓 Server entsperrt');
+      panelChannel.send("🔓 Server entsperrt");
     }
 
-    return interaction.editReply(
-      ok ? '🔓 Restore fertig' : '❌ Fehler beim Restore'
-    );
+    return interaction.editReply(ok ? "🔓 done" : "❌ error");
   }
 
-  // 📊 STATUS
   if (interaction.commandName === 'status') {
     const s = await lm.checkStatus();
 
     return interaction.reply(
       s
-        ? `🔒 LOCKDOWN aktiv\nLevel: ${s.level}\nGrund: ${s.reason}`
-        : '✅ Server normal'
+        ? `🔒 LOCKDOWN LVL ${s.level}`
+        : "✅ NORMAL"
     );
   }
 });
