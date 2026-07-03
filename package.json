@@ -1,7 +1,6 @@
 {
   "name": "discord-security-bot",
   "version": "1.0.0",
-  "description": "Schlanker Sicherheits-Bot ohne Dashboard",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
