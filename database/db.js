@@ -1,11 +1,9 @@
-CREATE TABLE IF NOT EXISTS active_lockdown (
-  id INT PRIMARY KEY DEFAULT 1,
-  incident_id TEXT,
-  level INT,
-  reason TEXT
-);
+const { Pool } = require('pg');
+require('dotenv').config();
 
-CREATE TABLE IF NOT EXISTS snapshots (
-  incident_id TEXT PRIMARY KEY,
-  data TEXT NOT NULL
-);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+module.exports = { pool };
