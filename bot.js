@@ -9,7 +9,6 @@ const {
 
 require('dotenv').config();
 
-const { pool } = require('../database/db');
 const LockdownManager = require('./systems/lockdownManager');
 
 const client = new Client({
@@ -21,12 +20,11 @@ const lm = new LockdownManager(client);
 let panelChannel = null;
 
 client.once('ready', async () => {
-  console.log(`🤖 Bot online: ${client.user.tag}`);
+  console.log(`🤖 Online: ${client.user.tag}`);
 
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
   if (!guild) return;
 
-  // 📌 PANEL CHANNEL
   panelChannel = guild.channels.cache.find(c => c.name === 'server-status');
 
   if (!panelChannel) {
@@ -40,29 +38,23 @@ client.once('ready', async () => {
         },
         {
           id: client.user.id,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.SendMessages
-          ]
+          allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
         }
       ]
     });
-
-    console.log("📌 Panel erstellt");
   }
 
-  await panelChannel.send("🛡 Security System aktiv");
+  await panelChannel.send("🛡 System aktiv");
 
-  // SLASH COMMANDS
   const commands = [
     new SlashCommandBuilder()
       .setName('lockdown')
       .setDescription('Server sperren')
       .addIntegerOption(o =>
-        o.setName('level').setRequired(true)
+        o.setName('level').setRequired(true).setDescription('1-3')
       )
       .addStringOption(o =>
-        o.setName('reason').setRequired(true)
+        o.setName('reason').setRequired(true).setDescription('Grund')
       ),
 
     new SlashCommandBuilder()
@@ -97,14 +89,12 @@ client.on('interactionCreate', async (interaction) => {
     const reason = interaction.options.getString('reason');
 
     if (await lm.isLocked()) {
-      return interaction.editReply("❌ Already locked");
+      return interaction.editReply("❌ Bereits aktiv");
     }
 
     const id = await lm.startLockdown(guild, level, reason);
 
-    if (panelChannel) {
-      panelChannel.send(`🚨 LOCKDOWN ${level} aktiv`);
-    }
+    panelChannel?.send(`🚨 LOCKDOWN LVL ${level}`);
 
     return interaction.editReply(`🚨 gestartet: ${id}`);
   }
@@ -113,29 +103,20 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply();
 
     const status = await lm.checkStatus();
-    if (!status) {
-      return interaction.editReply("✅ kein Lockdown");
-    }
+    if (!status) return interaction.editReply("✅ kein Lockdown");
 
-    const ok = await lm.restoreSnapshot(
-      guild,
-      status.incident_id
-    );
+    const ok = await lm.restoreSnapshot(guild, status.incident_id);
 
-    if (panelChannel) {
-      panelChannel.send("🔓 Server entsperrt");
-    }
+    panelChannel?.send("🔓 entsperrt");
 
-    return interaction.editReply(ok ? "🔓 done" : "❌ error");
+    return interaction.editReply(ok ? "🔓 done" : "❌ fail");
   }
 
   if (interaction.commandName === 'status') {
     const s = await lm.checkStatus();
 
     return interaction.reply(
-      s
-        ? `🔒 LOCKDOWN LVL ${s.level}`
-        : "✅ NORMAL"
+      s ? `🔒 LVL ${s.level}` : "✅ normal"
     );
   }
 });
