@@ -1,12 +1,11 @@
 const { PermissionFlagsBits } = require('discord.js');
-const { pool } = require('../../database/db');
+const { pool } = require('../database/db');
 
 class LockdownManager {
   constructor(client) {
     this.client = client;
   }
 
-  // 🔎 STATUS CHECK
   async checkStatus() {
     const res = await pool.query(
       'SELECT * FROM active_lockdown WHERE id=1'
@@ -21,7 +20,6 @@ class LockdownManager {
     return res.rows.length > 0;
   }
 
-  // 📸 SNAPSHOT + START LOCKDOWN
   async startLockdown(guild, level, reason) {
     const incidentId = `INC-${Date.now()}`;
 
@@ -57,13 +55,12 @@ class LockdownManager {
     await this.applyLockdown(guild, level);
 
     if (level >= 3) {
-      await this.deleteAllInvites(guild);
+      await this.deleteInvites(guild);
     }
 
     return incidentId;
   }
 
-  // 🔥 LOCKDOWN APPLY
   async applyLockdown(guild, level) {
     for (const [, channel] of guild.channels.cache) {
       if (!channel.permissionOverwrites) continue;
@@ -109,13 +106,12 @@ class LockdownManager {
     }
   }
 
-  // 🧨 INVITES DELETE (LEVEL 3)
-  async deleteAllInvites(guild) {
+  async deleteInvites(guild) {
     try {
       const invites = await guild.invites.fetch();
 
       for (const invite of invites.values()) {
-        await invite.delete("Lockdown Level 3 - Invite Cleanup");
+        await invite.delete("Level 3 Lockdown");
       }
 
       console.log(`🧨 ${invites.size} Invites gelöscht`);
@@ -124,7 +120,6 @@ class LockdownManager {
     }
   }
 
-  // 🔓 RESTORE 1:1
   async restoreSnapshot(guild, incidentId) {
     const res = await pool.query(
       'SELECT * FROM snapshots WHERE incident_id=$1',
